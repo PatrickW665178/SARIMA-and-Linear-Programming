@@ -1,0 +1,57 @@
+library(readr)
+library(forecast)
+library(ggplot2)
+library(lpSolve)
+library(reshape2)
+library(forecast)
+#install.packages("lpSolve")
+# --------------------
+# ① 電力需求預測：利用 SARIMA 模型
+# --------------------
+# 讀取 CSV 資料（請確認檔案路徑）
+data <- read.csv("electricity.csv", stringsAsFactors = FALSE)
+data$Time <- as.Date(data$Time, format = "%Y/%m/%d")
+
+# 假設資料為月資料，建立 TotalDemand 時間序列
+ts_demand <- ts(data$TotalDemand, start = c(2001, 1), frequency = 12)
+
+# 模型測試與驗證
+# --------------------
+# 為了評估模型預測效果，我將資料分割成訓練集與測試集
+# 訓練集為 2001 ~ 2018 年，測試集為 2019 ~ 2020 年
+train <- window(ts_demand, end = c(2018, 12))
+test <- window(ts_demand, start = c(2019, 1))
+
+# 利用訓練集建立 SARIMA 模型
+model_train <- auto.arima(train)
+
+# 檢查訓練集模型的殘差是否符合白噪音假設
+checkresiduals(model_train)
+
+# 利用訓練集模型預測測試集資料
+forecast_train <- forecast(model_train, h = length(test))
+
+# 透過 accuracy() 計算預測準確性指標（例如 RMSE、MAE、MAPE 等）
+print(accuracy(forecast_train, test))
+
+# 建立 SARIMA 模型
+model <- auto.arima(ts_demand)
+
+# 預測
+forecast_result <- forecast(model, h = 2)
+
+# 加入 10% 緩衝（預測值乘以 1.10）
+buffered_forecast <- forecast_result$mean * 1.10
+
+
+# 將 2024 年 1、2 月預測值總和作為總需求 D
+D <- sum(buffered_forecast)
+cat("預測含緩衝後兩月總需求 D =", D, "\n")
+
+# 繪製預測結果圖（原始與含 10% 緩衝預測）
+autoplot(forecast_result) +
+  autolayer(ts(buffered_forecast, start = c(2024,1), frequency = 12),
+            series = "含 10% 緩衝預測") +
+  ggtitle("SARIMA 模型：2024 年 1-2 月電力需求預測") +
+  xlab("年份") + ylab("電力需求 (kWh)") +
+  theme_minimal()
