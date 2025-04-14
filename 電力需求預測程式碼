@@ -55,3 +55,134 @@ autoplot(forecast_result) +
   ggtitle("SARIMA 模型：2024 年 1-2 月電力需求預測") +
   xlab("年份") + ylab("電力需求 (kWh)") +
   theme_minimal()
+
+# --------------------
+# ② 能源配置最佳化（LP 模型）
+# --------------------
+# 根據表格資料設定參數
+# 燃煤、天然氣、核能、風力、太陽能
+sources <- c("燃煤", "天然氣", "核能", "風力", "太陽能")
+install_cost <- c(2.93, 3.23, 1.42, 5.495, 4.405)     # 安裝成本 ($TWD/kWh)
+carbon_cost  <- c(2.028, 1.212, 0.03, 0.03, 0.119)      # 碳罰單價 ($TWD/kWh)
+capacity     <- c(19885344, 21196420, 951000, 3890247, 14281145)  # 容量上限 (kWh)
+
+# 計算目標函數係數
+# (A) 成本導向：70% 安裝成本 + 30% 碳罰
+f_cost <- 0.7 * install_cost + 0.3 * carbon_cost
+
+# (B) 碳排放導向：30% 安裝成本 + 70% 碳罰
+f_carbon <- 0.3 * install_cost + 0.7 * carbon_cost
+
+# 建立約束：總供應量恆等於 D
+A_eq <- matrix(rep(1, 5), nrow = 1)
+b_eq <- D
+
+# 建立核能約束：核能供給 <= 0.1 * D
+A_nuclear <- matrix(c(0, 0, 1, 0, 0), nrow = 1)
+b_nuclear <- 0.1 * D
+
+# --------------------
+# (1) 成本導向模型求解
+# --------------------
+# 先設定原始約束：總需求與核能供給限制
+A_cost <- rbind(A_eq, A_nuclear)
+dir_cost <- c("=", "<=")
+rhs_cost <- c(b_eq, b_nuclear)
+
+# 建立上下界的約束：每個變數 x_i 必須滿足 x_i <= capacity[i]
+A_bounds <- diag(5)          # 5x5 對角矩陣
+dir_bounds <- rep("<=", 5)     # 每個變數的限制方向均為 <=
+rhs_bounds <- capacity         # 每個變數的上限
+
+# 合併所有約束
+A_all <- rbind(A_cost, A_bounds)
+dir_all <- c(dir_cost, dir_bounds)
+rhs_all <- c(rhs_cost, rhs_bounds)
+
+# 呼叫 lp() 求解模型
+lp_cost <- lp(direction = "min",
+              objective.in = f_cost,
+              const.mat = A_all,
+              const.dir = dir_all,
+              const.rhs = rhs_all)
+
+if (lp_cost$status == 0) {
+  sol_cost <- lp_cost$solution
+  names(sol_cost) <- sources
+  cat("【成本導向最佳配置】\n")
+  print(sol_cost)
+  
+  rate_cost <- sol_cost / D * 100  # 百分比
+  cost_df <- data.frame(能源 = sources,
+                        供給量 = sol_cost,
+                        百分比 = round(rate_cost, 1))
+  print(cost_df)
+} else {
+  cat("成本導向模型求解失敗！\n")
+}
+
+# --------------------
+# (2) 碳排放導向模型求解 
+# --------------------
+# 原本需求與核能限制
+A_carbon <- rbind(A_eq, A_nuclear)
+dir_carbon <- c("=", "<=")
+rhs_carbon <- c(b_eq, b_nuclear)
+
+# 建立上下界約束：x_i <= capacity[i] (i=1,...,5)，用對角矩陣表示
+A_bounds <- diag(5)
+dir_bounds <- rep("<=", 5)
+rhs_bounds <- capacity
+
+# 合併所有約束：需求限制、核能限制與上下界約束
+A_all_carbon <- rbind(A_carbon, A_bounds)
+dir_all_carbon <- c(dir_carbon, dir_bounds)
+rhs_all_carbon <- c(rhs_carbon, rhs_bounds)
+
+# 呼叫 lp() 求解模型：這裡不指定 lower 與 upper，因為上下界已納入約束
+lp_carbon <- lp(direction = "min",
+                objective.in = f_carbon,
+                const.mat = A_all_carbon,
+                const.dir = dir_all_carbon,
+                const.rhs = rhs_all_carbon)
+
+if (lp_carbon$status == 0) {
+  sol_carbon <- lp_carbon$solution
+  names(sol_carbon) <- sources
+  cat("【碳排放導向最佳配置】\n")
+  print(sol_carbon)
+  
+  rate_carbon <- sol_carbon / D * 100
+  carbon_df <- data.frame(能源 = sources,
+                          供給量 = sol_carbon,
+                          百分比 = round(rate_carbon, 1))
+  print(carbon_df)
+} else {
+  cat("碳排放導向模型求解失敗！\n")
+}
+
+# --------------------
+# (3) 兩政策下配置結果比較（以百分比呈現）
+# --------------------
+policy_df <- data.frame(能源 = sources,
+                        成本導向 = sol_cost,
+                        碳排放導向 = sol_carbon)
+policy_df$成本導向百分比 <- round(policy_df$成本導向 / D * 100, 1)
+policy_df$碳排放導向百分比 <- round(policy_df$碳排放導向 / D * 100, 1)
+print(policy_df)
+
+# 轉換成 long 格式便於繪圖
+policy_long <- melt(policy_df[, c("能源", "成本導向百分比", "碳排放導向百分比")],
+                    id.vars = "能源",
+                    variable.name = "政策",
+                    value.name = "百分比")
+# 重新命名政策欄位
+policy_long$政策 <- ifelse(policy_long$政策 == "成本導向百分比", "成本導向", "碳排放導向")
+
+# 繪製條形圖
+ggplot(policy_long, aes(x = 能源, y = 百分比, fill = 政策)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  ggtitle("不同政策下最佳能源配置比例比較") +
+  xlab("能源來源") +
+  ylab("配置比例 (%)") +
+  theme_minimal()
